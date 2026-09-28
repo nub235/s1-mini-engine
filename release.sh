@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Cut a release: build the arm64 macOS tarball that a Homebrew formula or a
-# manual download would install, and (with --tag) create the matching git tag.
+# manual download would install, pin the checked-in Homebrew formula to the
+# result, and (with --tag) create the matching git tag.
 #
 # Usage:
 #   ./release.sh            # build dist/s1-mini-engine-vX.Y.Z-macos-arm64.tar.gz
@@ -23,7 +24,7 @@ for arg in "$@"; do
     case "$arg" in
     --tag) DO_TAG=true ;;
     -h | --help)
-        sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
         exit 0
         ;;
     *)
@@ -121,30 +122,72 @@ SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
 
 URL="https://github.com/nub235/s1-mini-engine/releases/download/$TAG/$STAGE_NAME-macos-arm64.tar.gz"
 
+# --- homebrew formula --------------------------------------------------------
+# homebrew/s1-mini-engine.rb is the canonical copy of the formula that the
+# nub235/homebrew-tap tap serves. Pinning its url and sha256 here is what keeps
+# the tap from silently pointing at the previous release. Both substitutions are
+# asserted afterwards, so reformatting the file fails the release loudly instead
+# of quietly leaving a stale pin behind.
+FORMULA="homebrew/s1-mini-engine.rb"
+FORMULA_NOTE="missing, skipped"
+if [ -f "$FORMULA" ]; then
+    FORMULA_BEFORE="$(shasum -a 256 "$FORMULA" | awk '{print $1}')"
+    # BSD sed takes no bare -i, so rewrite through a temp file. The patterns are
+    # anchored to the exact lines the file is expected to contain: a url inside
+    # this project's releases, and a 64-hex sha256.
+    sed -e "s|^  url \"https://github.com/[^\"]*\"\$|  url \"$URL\"|" \
+        -e "s|^  sha256 \"[0-9a-f]\\{64\\}\"\$|  sha256 \"$SHA\"|" \
+        "$FORMULA" >"$FORMULA.tmp"
+    mv "$FORMULA.tmp" "$FORMULA"
+    if ! grep -qF "  url \"$URL\"" "$FORMULA" ||
+        ! grep -qF "  sha256 \"$SHA\"" "$FORMULA"; then
+        echo "error: could not pin $FORMULA to $TAG." >&2
+        echo "       expected it to contain rewritable url/sha256 lines, but found:" >&2
+        grep -n '^  \(url\|sha256\) ' "$FORMULA" >&2 || true
+        exit 1
+    fi
+    FORMULA_NOTE="pinned to $VERSION"
+    if [ "$FORMULA_BEFORE" = "$(shasum -a 256 "$FORMULA" | awk '{print $1}')" ]; then
+        FORMULA_NOTE="already pinned to $VERSION"
+    fi
+else
+    echo "warning: $FORMULA not found; skipping the Homebrew formula." >&2
+fi
+
 cat <<EOF
 
 Built $TARBALL
-  size    $(du -h "$TARBALL" | cut -f1)
-  sha256  $SHA
-  version $VERSION (tag $TAG)
+  size      $(du -h "$TARBALL" | cut -f1)
+  sha256    $SHA
+  version   $VERSION (tag $TAG)
+  formula   $FORMULA ($FORMULA_NOTE)
 
 This sha256 belongs to THIS file. Upload it, then use this number; do not
 re-run this script in between, or the upload and the formula will disagree.
 
-Homebrew formula fields:
-
-    url "$URL"
-    sha256 "$SHA"
-
 Next steps (not run for you):
 
+    git add $FORMULA
+    git commit -m "Pin the Homebrew formula to $VERSION"
     git tag -a $TAG -m "s1-mini-engine $VERSION"
+    git push origin main
     git push origin $TAG
     gh release create $TAG "$TARBALL" --title "$TAG" --notes "s1-mini-engine $VERSION"
+
+The tap serves a copy of that same file:
+
+    cp $FORMULA <tap-checkout>/Formula/s1-mini-engine.rb
+    git -C <tap-checkout> commit -am "s1-mini-engine $VERSION"
+    git -C <tap-checkout> push
 EOF
 
 if $DO_TAG; then
     git tag -a "$TAG" -m "s1-mini-engine $VERSION"
     echo
     echo "Created local tag $TAG (still needs 'git push origin $TAG')."
+    if [ "$FORMULA_NOTE" = "pinned to $VERSION" ]; then
+        echo "Note: $FORMULA is still uncommitted, so $TAG does not contain it."
+        echo "      Commit the pin and re-run with --tag if you want them together;"
+        echo "      the tarball is reproducible, so the sha256 will not change."
+    fi
 fi
