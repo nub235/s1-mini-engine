@@ -12,7 +12,8 @@ import Darwin
 //   s1-mini-engine pull                           download the weights (see Puller.swift)
 //
 // Flags: -i/--repl, --naive, --verify, --max-tokens N, --http, --host H,
-//        --port N, --prompt "..." (alias for a positional transcript), -h/--help
+//        --port N, --idle-timeout D, --prompt "..." (alias for a positional
+//        transcript), -h/--help
 
 let programName = "s1-mini-engine"
 // versionString lives in Version.swift so release tooling has one place to read.
@@ -47,6 +48,11 @@ func printUsage() {
           --http              run the OpenAI-compatible HTTP server
           --host H            bind address for --http (default 127.0.0.1)
           --port N            port for --http (default 8080)
+          --idle-timeout D    free the model after D idle time (e.g. 300, 5m, 1h)
+                              and reload on the next request, so an idle server
+                              or REPL holds ~60 MB instead of ~1 GB;
+                              0 = never unload (default). The model then loads
+                              on first use instead of at startup.
           --prompt "TEXT"     alias for supplying the transcript as an argument
       -h, --help              show this help
           --version           print version and exit
@@ -81,6 +87,20 @@ func resolveModelPath(explicit: String?) -> String? {
     return nil
 }
 
+/// Parse an `--idle-timeout` value: seconds, or a `s`/`m`/`h` suffix. 0 disables
+/// unloading. Minutes and hours exist because they are the units a human picks.
+func parseIdleDuration(_ raw: String) -> Double? {
+    let s = raw.lowercased()
+    var digits = s
+    var scale: Double = 1
+    if let last = s.last, "smh".contains(last) {
+        digits = String(s.dropLast())
+        scale = last == "m" ? 60 : (last == "h" ? 3600 : 1)
+    }
+    guard let v = Double(digits), v.isFinite, v >= 0 else { return nil }
+    return v * scale
+}
+
 var verifyMode = false
 var statsMode = false
 var naiveMode = false
@@ -90,6 +110,7 @@ var httpHost = "127.0.0.1"
 var httpPort: UInt16 = 8080
 var explicitModel: String? = nil
 var promptText: String? = nil
+var idleSeconds = 0.0
 
 let rawArgs = Array(CommandLine.arguments.dropFirst())
 
@@ -146,6 +167,12 @@ while argIdx < rawArgs.count {
             FileHandle.standardError.write(Data("Error: --max-tokens must be a positive integer\n".utf8)); exit(2)
         }
         maxTokens = n
+    case "--idle-timeout":
+        guard let secs = parseIdleDuration(value("--idle-timeout")) else {
+            FileHandle.standardError.write(Data("Error: --idle-timeout must be a duration, e.g. 300, 5m, 1h (0 = never unload)\n".utf8))
+            exit(2)
+        }
+        idleSeconds = secs
     case "--prompt":     promptText = value("--prompt")
     default:
         if arg.hasPrefix("-") { unknownArgs.append(arg) } else { positional(arg) }
@@ -193,46 +220,23 @@ ggml_time_init()
 llama_backend_init()
 defer { llama_backend_free() }
 
-// --- LOAD MODEL (once per process) ---
-// model/context are declared as top-level `let` globals (not `guard let` locals)
-// so the generation functions here and in other files can reference them without
-// running into closure-capture restrictions.
-var modelParams = llama_model_default_params()
-modelParams.n_gpu_layers = 999 // offload everything to Metal
-
-let loadStart = ggml_time_us()
-let model: OpaquePointer = {
-    if showBanner {
-        print("Loading \(modelPath) ...", terminator: "")
-        fflush(stdout)
-    }
-    guard let m = llama_model_load_from_file(modelPath, modelParams) else {
-        print("\nFailed to load model at \(modelPath)")
-        exit(1)
-    }
-    return m
-}()
-defer { llama_model_free(model) }
-
-let vocab = llama_model_get_vocab(model)
-
-var ctxParams = llama_context_default_params()
-ctxParams.n_ctx = 0       // use context length from GGUF metadata
-ctxParams.n_batch = 1024
-
-let context: OpaquePointer = {
-    guard let c = llama_init_from_model(model, ctxParams) else {
-        print("\nFailed to create context")
-        exit(1)
-    }
-    return c
-}()
-defer { llama_free(context) }
-let loadEnd = ggml_time_us()
-let loadSeconds = Double(loadEnd - loadStart) / 1_000_000.0
-if showBanner {
-    print(String(format: " %.2fs", loadSeconds))
+// --- LOAD MODEL ---
+// Default: loaded right here, so a bad path or a slow disk read surfaces before the
+// first request and the banner can report the cost. With --idle-timeout the load is
+// deferred to the first request and repeated after every idle unload; Engine.swift
+// owns that policy.
+Engine.configure(idleTimeout: idleSeconds)
+if Engine.idleTimeout == 0 {
+    Engine.load()
 }
+// Registered after the backend's own defer, so it runs first (defers unwind LIFO)
+// and the model is gone before llama_backend_free().
+defer { Engine.shutdown() }
+
+if Engine.idleTimeout > 0 && (replMode || httpMode) {
+    Engine.startReaper()
+}
+
 if replMode {
     print()
     print(String(repeating: "=", count: 60))
@@ -240,6 +244,9 @@ if replMode {
     print("Default control: \(defaultControl)")
     print("Tip: you can override by starting your input with [Styling: ...]")
     print("Commands: /quit, /exit, /q to exit | /help for help")
+    if Engine.idleTimeout > 0 {
+        print("Idle: the model frees after \(Int(Engine.idleTimeout))s without input and reloads on the next line.")
+    }
     print(String(repeating: "=", count: 60))
     print("")
 }
@@ -616,13 +623,21 @@ private func tokenPiece(_ token: llama_token) -> String {
 // The byte-identical head of every request prompt: the system block, the start
 // of the user turn, and (when the request keeps the default control line) the
 // control line itself. Derived from buildPromptText so the two cannot drift
-// apart, and tokenized on its own so its KV can be evaluated once per process.
-private let promptPrefixText: String = {
-    let marker = "\u{1}"
-    let full = buildPromptText(marker)
-    guard let r = full.range(of: marker) else { return "" }
-    return String(full[full.startIndex..<r.lowerBound])
-}()
+// apart, and tokenized on its own so its KV can be evaluated once per context.
+//
+// Deliberately a `static let` rather than a top-level `let`: a top-level binding
+// in main.swift is a LOCAL of the implicit main() function, alive only from its
+// own line onward. Engine warms this during the eager startup load, which runs
+// well before a binding declared down here exists -- reading one there is a read
+// of uninitialized memory (it segfaults).
+private enum PromptPrefix {
+    static let text: String = {
+        let marker = "\u{1}"
+        let full = buildPromptText(marker)
+        guard let r = full.range(of: marker) else { return "" }
+        return String(full[full.startIndex..<r.lowerBound])
+    }()
+}
 
 private func buildPromptText(_ rawTranscript: String) -> String {
     // Mirror the fixed behavior of the GGUF's embedded chat template.
@@ -763,7 +778,7 @@ private func buildDraftSource(_ transcriptText: String) -> String {
 // --- STATIC-PROMPT PREFIX REUSE ---
 //
 // The head of every request prompt is byte-identical, so its KV only ever needs
-// computing once per process: warm it at startup, then per request keep the
+// computing once per loaded context: warm it at load, then per request keep the
 // longest common token prefix of what is already cached and evaluate just the
 // divergent tail -- in ONE pass, requesting logits on the final row only. That
 // row's batch index comes back as `firstRow` for the walk's first sample, so
@@ -778,20 +793,25 @@ private func buildDraftSource(_ transcriptText: String) -> String {
 // an independent full prefill on a cleared cache and so never inherits the warm
 // prefix. Note the converse: because naive clears the cache, verify runs always
 // measure the cold (zero-reuse) spec path.
-private var kvPrefixTokens: [llama_token] = []
+//
+// kvPrefixTokens (the record of what is resident in seq 0) lives in Engine.swift:
+// freeing the context has to clear it, and a stale record would claim cached KV
+// that no longer exists.
 
 /// Longest prefix of `tokens` that is already sitting in the cache (seq 0).
 private func kvCommonPrefix(_ tokens: [llama_token]) -> Int {
     var l = 0
-    let n = min(kvPrefixTokens.count, tokens.count)
-    while l < n && kvPrefixTokens[l] == tokens[l] { l += 1 }
+    let n = min(Engine.kvPrefixTokens.count, tokens.count)
+    while l < n && Engine.kvPrefixTokens[l] == tokens[l] { l += 1 }
     return l
 }
 
-/// Evaluate the static prompt head into seq 0, once per process.
-private func prefillStaticPrefix() {
-    let tokens = tokenizeText(promptPrefixText, addBos: true, parseSpecial: true)
+/// Evaluate the static prompt head into seq 0, once per loaded context.
+/// Called by Engine after each load, so a reloaded context is warm again at once.
+func prefillStaticPrefix() {
+    let tokens = tokenizeText(PromptPrefix.text, addBos: true, parseSpecial: true)
     guard !tokens.isEmpty else { return }
+    let t0 = ggml_time_us()
     llama_memory_seq_rm(llama_get_memory(context), 0, -1, -1)
     var b = llama_batch_init(Int32(tokens.count), 0, 1)
     for (i, t) in tokens.enumerated() {
@@ -805,7 +825,11 @@ private func prefillStaticPrefix() {
     let ok = llama_decode(context, b) == 0
     llama_synchronize(context)
     llama_batch_free(b)
-    if ok { kvPrefixTokens = tokens }
+    if ok { Engine.kvPrefixTokens = tokens }
+    if ProcessInfo.processInfo.environment["SPEC_LOG"] != nil {
+        let ms = Double(ggml_time_us() - t0) / 1000.0
+        FileHandle.standardError.write(Data(String(format: "[prefix] warmed %d tok in %.0fms\n", Engine.kvPrefixTokens.count, ms).utf8))
+    }
 }
 
 /// Evaluate whatever part of `tokens` is not already cached, leaving exactly one
@@ -850,7 +874,7 @@ private func prefillPromptTail(_ tokens: [llama_token], stats: inout SpecStats, 
         done += n
     }
     firstRow = Int32(lastChunk - 1)
-    kvPrefixTokens = tokens
+    Engine.kvPrefixTokens = tokens
     return true
 }
 
@@ -858,6 +882,10 @@ private func prefillPromptTail(_ tokens: [llama_token], stats: inout SpecStats, 
 
 func correctNaive(rawTranscript: String, emit: ((String) -> Void)? = nil) -> (output: String, stats: SpecStats) {
     var stats = SpecStats()
+    // Pins the model for the whole decode, loading it first if an idle unload (or
+    // --idle-timeout's deferred start) left it unloaded. See Engine.swift.
+    Engine.beginUse()
+    defer { Engine.endUse() }
 
     llama_perf_context_reset(context)
     // Deliberately independent of the spec path: clear the cache completely and
@@ -865,7 +893,7 @@ func correctNaive(rawTranscript: String, emit: ((String) -> Void)? = nil) -> (ou
     // against a genuinely separate full prefill. This also drops the warmed
     // prefix, so the spec run that follows measures the cold path.
     llama_memory_seq_rm(llama_get_memory(context), 0, -1, -1)
-    kvPrefixTokens = []
+    Engine.kvPrefixTokens = []
 
     let promptTokens = tokenizeText(buildPromptText(rawTranscript), addBos: true, parseSpecial: true)
     guard !promptTokens.isEmpty else { return ("[Tokenization failed]", stats) }
@@ -929,6 +957,8 @@ func correctNaive(rawTranscript: String, emit: ((String) -> Void)? = nil) -> (ou
 
 func correctSpeculative(rawTranscript: String, emit: ((String) -> Void)? = nil) -> (output: String, stats: SpecStats) {
     var stats = SpecStats()
+    Engine.beginUse()
+    defer { Engine.endUse() }
 
     // The draft source is the dictated text only (strip a leading control line).
     let transcriptText: String
@@ -1385,17 +1415,6 @@ func enhanceTranscript(_ text: String,
     return naive
         ? correctNaive(rawTranscript: normalized, emit: emit)
         : correctSpeculative(rawTranscript: normalized, emit: emit)
-}
-
-// --- WARM THE STATIC PROMPT PREFIX ---
-// A one-time cost, paid here rather than inside every request.
-do {
-    let t0 = ggml_time_us()
-    prefillStaticPrefix()
-    if ProcessInfo.processInfo.environment["SPEC_LOG"] != nil {
-        let ms = Double(ggml_time_us() - t0) / 1000.0
-        FileHandle.standardError.write(Data(String(format: "[prefix] warmed %d tok in %.0fms\n", kvPrefixTokens.count, ms).utf8))
-    }
 }
 
 /// One-line summary of a decode's counters, shared by the REPL and `--stats` so a

@@ -81,6 +81,9 @@ s1-mini-engine
 # OpenAI-compatible HTTP server
 s1-mini-engine --http --port 8080
 
+# same, but hold ~60 MB instead of ~1 GB while idle (reloads on demand)
+s1-mini-engine --http --port 8080 --idle-timeout 5m
+
 # download the weights (the only subcommand)
 s1-mini-engine pull
 ```
@@ -112,6 +115,7 @@ If nothing is found, the engine exits with an error rather than guessing —
 | `--max-tokens N` | Max generated tokens per request (default `2048`). |
 | `--http` | Run the OpenAI-compatible server. |
 | `--host H` / `--port N` | Server bind address / port (default `127.0.0.1:8080`). |
+| `--idle-timeout D` | Free the model after `D` idle time (`300`, `5m`, `1h`) and reload on the next request. `0` = never unload. See [Memory](#memory-and-idle-unloading). |
 | `--prompt "TEXT"` | Alias for passing the transcript positionally. |
 | `-h`, `--help`, `--version` | Usage / version. |
 
@@ -207,6 +211,52 @@ Inputs longer than **4000 characters** are automatically split at sentence
 boundaries, normalized piece by piece, and stitched back together with the
 original separators. Requests over **32000 characters** are rejected (`413`);
 on the CLI they are truncated with a warning.
+
+---
+
+## Memory and idle unloading
+
+By default the model is loaded at startup and held for the life of the process.
+That is roughly **1 GB of RAM** while resident (Q6_K weights plus a 4096-token KV
+cache and Metal buffers), which is a lot on an 8 GB machine.
+
+`--idle-timeout` trades a reload for that memory:
+
+```bash
+s1-mini-engine --http --port 8080 --idle-timeout 5m
+```
+
+The model then loads on **first use** rather than at startup, and is freed after
+five minutes with nothing in flight. The next request reloads it — and a reload
+means reading the 495 MB file again, about **0.2-0.3 s** while it is still in the
+page cache and **~0.75 s** from a cold read. Only `POST` requests load anything;
+`GET /health` stays cheap, so a health check never costs you a gigabyte.
+
+Measured with the Q6_K export:
+
+| state | RSS |
+| --- | --- |
+| running, never used (or after an unload) | **~60 MB** |
+| one request in flight / recently served | **~1.0 GB** |
+
+Loads and unloads are announced on stderr, so stdout stays a clean pipe:
+
+```
+[model loaded in 0.34s]
+[model unloaded after 305s idle]
+[model loaded in 0.28s (reload)]
+```
+
+Notes:
+
+- `0` (the default) means never unload, which is the original behavior.
+- The value is only checked between requests — a long generation will never be
+  interrupted by an unload, and a request arriving during one just waits for it.
+- Unloads happen on a 1 s poll, so the real idle time is up to a second longer
+  than the timeout.
+- Do not set it shorter than your typical pause between requests. This flag is
+  for reclaiming RAM while you are genuinely away, not for cycling the model
+  between keystrokes.
 
 ---
 

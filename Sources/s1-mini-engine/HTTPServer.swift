@@ -56,6 +56,9 @@ func runHTTPServer(host: String, port: UInt16, modelName: String, naive: Bool) -
     print("\(programName) server listening on http://\(host):\(port)")
     print("  POST /v1/chat/completions   GET /v1/models   GET /health")
     print("  model: \(modelName)  decoding: \(naive ? "naive" : "speculative")  input cap: \(Chunker.totalCap) chars")
+    if Engine.idleTimeout > 0 {
+        print("  idle: model freed after \(Int(Engine.idleTimeout))s without a request, reloaded on the next one")
+    }
     fflush(stdout)
 
     while true {

@@ -124,6 +124,13 @@ extension SpecStats {
 func enhanceLongText(_ text: String,
                      naive: Bool,
                      emit: ((String) -> Void)? = nil) -> (output: String, stats: SpecStats) {
+    // Pins the model for the WHOLE request, seams between chunks included.
+    // correctNaive/correctSpeculative bracket themselves as well, but those cover
+    // only one decode each -- a multi-chunk request would drop to zero in flight
+    // between chunks, which is a window where an idle unload could land mid-request.
+    // The count nests, so the inner brackets cannot release this early.
+    Engine.beginUse()
+    defer { Engine.endUse() }
     let planned = Chunker.plan(text)
     if planned.count <= 1 {
         return enhanceTranscript(text, naive: naive, emit: emit)
