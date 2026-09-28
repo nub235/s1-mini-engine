@@ -93,6 +93,21 @@ cp -p "$BIN" "$STAGE/"
 cp -Rp ".build/release/llama.framework" "$STAGE/"
 cp -p LICENSE README.md "$STAGE/" 2>/dev/null || true
 find "$STAGE" -name '.DS_Store' -delete
+
+# Strip extended attributes from the stage. cp copies them, and two matter:
+#   com.apple.quarantine   If the bundled framework is quarantined, dyld refuses to
+#                          load it ("library load disallowed by system policy") and
+#                          macOS raises a Gatekeeper "allow" dialog. The staged run
+#                          below would then block on a human click, which looks
+#                          exactly like a hang. The tarball is archived with
+#                          --no-xattrs, so the artifact we ship never carries
+#                          quarantine; the copy we test must not either.
+#   com.apple.provenance   Stamped by macOS on every file a process creates, with a
+#                          value that varies per copy, so it cannot be shipped at
+#                          all. It is protected and survives this strip, which is
+#                          why the tar step below still needs --no-xattrs.
+xattr -cr "$STAGE" 2>/dev/null || true
+
 # Pin every staged timestamp. tar records member mtimes, including directories and
 # symlinks, so without this the tarball differs byte-for-byte on every run and the
 # sha256 a Homebrew formula pins could never match a re-run of this script.
@@ -100,7 +115,36 @@ find "$STAGE" -name '.DS_Store' -delete
 find "$STAGE" -exec touch -h -t 202601010000 {} +
 
 # Prove the staged copy is actually runnable before packaging it.
-RUN_VERSION="$("$STAGE/s1-mini-engine" --version)"
+#
+# Bounded on purpose. "The framework could not be loaded" surfaces as a modal dialog
+# on some machines rather than as an error, so the process waits for a click and an
+# unattended release run sits there indefinitely.
+run_with_timeout() {
+    local secs="$1"
+    shift
+    "$@" &
+    local pid=$!
+    local waited=0
+    while [ "$waited" -lt "$secs" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid"
+            return $?
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    kill -9 "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    return 124
+}
+
+RUN_VERSION="$(run_with_timeout 30 "$STAGE/s1-mini-engine" --version)" || {
+    echo "error: the staged binary reported no version within 30s." >&2
+    echo "       If macOS is showing a Gatekeeper dialog for llama.framework, allow it" >&2
+    echo "       and re-run. To see the real error, run it by hand:" >&2
+    echo "         \"$STAGE/s1-mini-engine\" --version" >&2
+    exit 1
+}
 echo "Staged binary reports: $RUN_VERSION"
 if [ "$RUN_VERSION" != "s1-mini-engine $VERSION" ]; then
     echo "error: staged binary reports '$RUN_VERSION' but $VERSION_FILE says $VERSION." >&2

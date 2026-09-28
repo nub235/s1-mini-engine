@@ -52,6 +52,40 @@ MODEL=F16  ./setup.sh   # full precision, ~1.2 GB
 > **Note:** `setup.sh` downloads from `nub235/s1-mini-GGUF` by default. Override
 > with `HF_REPO=<user>/<repo>` if you mirror the weights elsewhere.
 
+### If macOS refuses to run it
+
+The binary and the bundled `llama.framework` are **ad-hoc signed, not notarized**
+(notarizing needs a paid Apple Developer account), so macOS cannot vouch for them.
+Whether that affects you depends only on how the file reached your disk:
+
+| How you got it | Quarantined | Result |
+| --- | --- | --- |
+| `brew install` | no | runs |
+| `curl … \| tar` | no | runs |
+| downloaded in a browser, then extracted | **yes** | macOS blocks it |
+
+A quarantined framework fails in a way that is hard to read, because it is the
+*dylib* the system objects to, not the command you ran:
+
+```
+Library not loaded: @rpath/llama.framework/Versions/Current/llama
+  ... (code signature in '.../llama.framework/Versions/A/llama'
+       not valid for use in process: library load disallowed by system policy)
+```
+
+If you launched it from the Finder you instead get a dialog that waits for a
+click, which looks like a hang. Either way, clearing the flag is the whole fix:
+
+```bash
+xattr -dr com.apple.quarantine /path/to/s1-mini-engine
+xattr -dr com.apple.quarantine /path/to/llama.framework
+```
+
+Release tarballs are archived with `--no-xattrs`, so they never ship a quarantine
+flag — it is added by whatever downloaded the file, which is why Homebrew and
+`curl` never hit this. Note also that `spctl -a` reports `rejected` even for a
+working install; that is the notarization check failing, not a broken binary.
+
 ### Getting the weights
 
 Downloading the model is always an explicit step, never a side effect of
@@ -322,6 +356,14 @@ prints cannot drift apart. The tarball is self-contained — it bundles
 tarball that ships is a tarball that starts. It never pushes; it prints the
 `git push` / `gh release create` commands for you to run deliberately.
 
+It also rewrites the pinned `url` and `sha256` in
+[`homebrew/s1-mini-engine.rb`](homebrew/s1-mini-engine.rb), the canonical copy of
+the formula served by the [`nub235/homebrew-tap`](https://github.com/nub235/homebrew-tap)
+tap, so a release cannot leave the tap pointing at the previous version. Those
+substitutions are asserted: reformat the file so the lines no longer match and
+the release fails, rather than quietly shipping a stale pin. Publishing the tap
+itself stays a deliberate copy-and-push of that one file.
+
 ### Development flags
 
 - `--verify` — run naive and speculative decoding on the same input and assert
@@ -420,8 +462,10 @@ response, and `--naive` remains the honest advice for raw input.
 ├── hf/                      # publishing the weights to Hugging Face
 │   ├── README.md            # the model card
 │   └── upload.sh            # uploads the GGUF exports
+├── homebrew/
+│   └── s1-mini-engine.rb    # canonical formula, mirrored to the tap
 ├── setup.sh                 # build + `pull`
-├── release.sh               # release tarball (+ optional git tag)
+├── release.sh               # tarball + formula pin (+ optional git tag)
 ├── .gitignore
 └── LICENSE
 ```
