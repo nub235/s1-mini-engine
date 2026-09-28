@@ -398,14 +398,22 @@ response, and `--naive` remains the honest advice for raw input.
 ├── Sources/s1-mini-engine/
 │   ├── main.swift           # CLI, model loading, both decode paths
 │   ├── Chunker.swift        # sentence-aware chunking + stitching
+│   ├── Engine.swift         # model/context lifetime + idle unloading
 │   ├── HTTPServer.swift     # OpenAI-compatible HTTP server
 │   ├── Puller.swift         # the `pull` subcommand
 │   └── Version.swift        # the version, in one place
 ├── llama.xcframework/       # pre-compiled llama.cpp (arm64 macOS)
-├── bench/                   # corpus builder + draft-mode benchmark
-├── hf/                      # Hugging Face model card + upload script
+│   └── macos-arm64/llama.framework/
+├── bench/                   # draft-mode benchmark (dev only, not shipped)
+│   ├── make_corpus.py       # builds the corpus from a HF dataset
+│   ├── bench.py             # measures draft modes against the engine
+│   └── corpus.jsonl         # the generated corpus (20 transcripts)
+├── hf/                      # publishing the weights to Hugging Face
+│   ├── README.md            # the model card
+│   └── upload.sh            # uploads the GGUF exports
 ├── setup.sh                 # build + `pull`
 ├── release.sh               # release tarball (+ optional git tag)
+├── .gitignore
 └── LICENSE
 ```
 
