@@ -1,0 +1,22 @@
+# Build artifacts
+.build/
+.swiftpm/
+Package.resolved
+
+# Release tarballs produced by release.sh
+dist/
+
+# Model weights: distributed via Hugging Face, never committed to GitHub
+# (the Q6_K export alone is ~495 MB, far over GitHub's 100 MB file limit)
+*.gguf
+
+# Local development fixtures, not part of the published project
+test-corpus.txt
+test-results.txt
+
+# Benchmark runs (bench/corpus.jsonl IS tracked: regenerate with bench/make_corpus.py)
+bench/*.log
+bench/results-*.json
+
+# macOS
+.DS_Store
