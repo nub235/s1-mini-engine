@@ -5,8 +5,8 @@
 class S1MiniEngine < Formula
   desc "Engine for running Superwhisper S1-mini to normalize ASR transcripts"
   homepage "https://github.com/nub235/s1-mini-engine"
-  url "https://github.com/nub235/s1-mini-engine/releases/download/v1.1.0/s1-mini-engine-v1.1.0-macos-arm64.tar.gz"
-  sha256 "0131ae7f08ec86144ce88d70d1de9d17fb07d574ad671542cf8c7b0a946e1cf5"
+  url "https://github.com/nub235/s1-mini-engine/releases/download/v1.1.1/s1-mini-engine-v1.1.1-macos-arm64.tar.gz"
+  sha256 "efd2615c9a5eadbfc4c9b3a1421981101855a70cfe614b133d71e3d69bae24a7"
   license "MIT"
 
   depends_on arch: :arm64
