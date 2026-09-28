@@ -84,7 +84,13 @@ fi
 # --- stage -------------------------------------------------------------------
 # The binary links llama.framework from @loader_path, so the framework must sit
 # next to it inside the tarball; a lone executable would not start.
-STAGE_NAME="s1-mini-engine-$TAG"
+#
+# The directory inside the tarball is named after the tarball itself, so the usual
+# `tar xzf X.tar.gz && cd X` works. It used to be `s1-mini-engine-vX.Y.Z` while the
+# archive was `s1-mini-engine-vX.Y.Z-macos-arm64.tar.gz`: that idiom then led
+# nowhere, and the published install notes got it wrong because of it.
+PLATFORM="macos-arm64"
+STAGE_NAME="s1-mini-engine-$TAG-$PLATFORM"
 STAGE="dist/$STAGE_NAME"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
@@ -151,7 +157,7 @@ if [ "$RUN_VERSION" != "s1-mini-engine $VERSION" ]; then
     exit 1
 fi
 
-TARBALL="dist/$STAGE_NAME-macos-arm64.tar.gz"
+TARBALL="dist/$STAGE_NAME.tar.gz"
 rm -f "$TARBALL"
 # Three details make this reproducible, and all of them matter because the
 # formula pins the sha256:
@@ -164,7 +170,7 @@ rm -f "$TARBALL"
 COPYFILE_DISABLE=1 tar --no-xattrs -cf - -C dist "$STAGE_NAME" | gzip -9n > "$TARBALL"
 SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
 
-URL="https://github.com/nub235/s1-mini-engine/releases/download/$TAG/$STAGE_NAME-macos-arm64.tar.gz"
+URL="https://github.com/nub235/s1-mini-engine/releases/download/$TAG/$STAGE_NAME.tar.gz"
 
 # --- homebrew formula --------------------------------------------------------
 # homebrew/s1-mini-engine.rb is the canonical copy of the formula that the
