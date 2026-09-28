@@ -275,12 +275,21 @@ means reading the 495 MB file again, about **0.2-0.3 s** while it is still in th
 page cache and **~0.75 s** from a cold read. Only `POST` requests load anything;
 `GET /health` stays cheap, so a health check never costs you a gigabyte.
 
-Measured with the Q6_K export:
+Measured with the Q6_K export, reading RSS from `ps`:
 
 | state | RSS |
 | --- | --- |
-| running, never used (or after an unload) | **~60 MB** |
+| started with `--idle-timeout`, nothing served yet | **~40 MB** |
+| after an idle unload | **~55 MB** |
 | one request in flight / recently served | **~1.0 GB** |
+
+An unload therefore returns roughly **0.9 GB**. The two small states are not the
+same number: a process that has loaded and released the model holds ~15 MB more
+than one that never loaded it. Neither is zero.
+
+Activity Monitor's Memory column reports *physical footprint* rather than RSS and
+reads lower again — ~19 MB / ~29 MB / ~527 MB for the same three states — so the
+two figures are not in conflict, they are different metrics.
 
 Loads and unloads are announced on stderr, so stdout stays a clean pipe:
 
