@@ -430,6 +430,35 @@ report carries three things worth distinguishing:
   perfect agreement is not expected; what recall catches is content *going
   missing*.
 
+### Reading the `--stats` line
+
+The line is prefixed `SPEC` or `NAIVE`. One real run, from the example above:
+
+```
+SPEC  0.07s | Prefill 529 t/s (86 tok, 69 cached) | Draft 162 tok/s (6/6 accepted, 100%) | Gen 75.0% from drafts (2 serial tok) | Cycles 2 (run 1 / serial 1 / naive 0)
+```
+
+| field | meaning |
+| --- | --- |
+| `SPEC 0.07s` | time in the decode region, excluding model load and the prefix warm |
+| `Prefill 529 t/s (86 tok, 69 cached)` | prompt ingestion, and how many of those tokens were already resident from the warmed static prefix |
+| `Draft 162 tok/s (6/6 accepted, 100%)` | candidates the draft proposed and how many survived verification against the model |
+| `Gen 75.0% from drafts (2 serial tok)` | share of generated tokens committed from a verified draft, and how many instead took an ordinary autoregressive step |
+| `Cycles 2 (run 1 / serial 1 / naive 0)` | speculation cycles by kind: multi-token runs, width-1 re-anchor steps, and the plain fallback |
+| `Wasted N proposals` | candidates batched then abandoned — printed only when non-zero |
+
+**`serial tok` does not mean unverified.** It counts the tokens the draft had no
+usable proposal for, so the engine decoded them one at a time — the same
+computation `--naive` performs. Speculation is lossless by construction, and
+`--verify` checks that over the *whole* output by running both paths and
+comparing them byte-for-byte, which is stronger than checking tokens one by one.
+A run that is 75% from drafts is not a run where a quarter of the text escaped
+verification; it is a run where a quarter of the tokens were not worth predicting
+ahead of time.
+
+With `--naive` the draft fields are absent and a single `AR` field takes their
+place, since nothing is speculated.
+
 ### Reading the acceptance number
 
 `Draft 93 tok/s (34/43 accepted, 79%)` divides accepted candidates by candidates
