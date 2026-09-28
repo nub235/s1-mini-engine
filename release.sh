@@ -88,10 +88,15 @@ STAGE="dist/$STAGE_NAME"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
-cp "$BIN" "$STAGE/"
-cp -R ".build/release/llama.framework" "$STAGE/"
-cp LICENSE README.md "$STAGE/" 2>/dev/null || true
+cp -p "$BIN" "$STAGE/"
+cp -Rp ".build/release/llama.framework" "$STAGE/"
+cp -p LICENSE README.md "$STAGE/" 2>/dev/null || true
 find "$STAGE" -name '.DS_Store' -delete
+# Pin every staged timestamp. tar records member mtimes, including directories and
+# symlinks, so without this the tarball differs byte-for-byte on every run and the
+# sha256 a Homebrew formula pins could never match a re-run of this script.
+# 2026-01-01 00:00:00, chosen only because it is fixed and obviously synthetic.
+find "$STAGE" -exec touch -h -t 202601010000 {} +
 
 # Prove the staged copy is actually runnable before packaging it.
 RUN_VERSION="$("$STAGE/s1-mini-engine" --version)"
@@ -103,8 +108,15 @@ fi
 
 TARBALL="dist/$STAGE_NAME-macos-arm64.tar.gz"
 rm -f "$TARBALL"
-# COPYFILE_DISABLE stops macOS tar from embedding ._* AppleDouble entries.
-COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C dist "$STAGE_NAME"
+# Three details make this reproducible, and all of them matter because the
+# formula pins the sha256:
+#   --no-xattrs        macOS stamps files it creates with a com.apple.provenance
+#                      xattr whose value changes per copy, so archiving xattrs made
+#                      the bytes differ on every run even when contents did not.
+#   COPYFILE_DISABLE   stops tar embedding ._* AppleDouble entries.
+#   gzip -n            drops the gzip header's MTIME. With plain `tar -czf`, byte 4
+#                      of the file changed every run on its own.
+COPYFILE_DISABLE=1 tar --no-xattrs -cf - -C dist "$STAGE_NAME" | gzip -9n > "$TARBALL"
 SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
 
 URL="https://github.com/nub235/s1-mini-engine/releases/download/$TAG/$STAGE_NAME-macos-arm64.tar.gz"
@@ -115,6 +127,9 @@ Built $TARBALL
   size    $(du -h "$TARBALL" | cut -f1)
   sha256  $SHA
   version $VERSION (tag $TAG)
+
+This sha256 belongs to THIS file. Upload it, then use this number; do not
+re-run this script in between, or the upload and the formula will disagree.
 
 Homebrew formula fields:
 
