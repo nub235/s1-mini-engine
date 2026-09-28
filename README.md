@@ -295,6 +295,10 @@ Notes:
 - `0` (the default) means never unload, which is the original behavior.
 - The value is only checked between requests — a long generation will never be
   interrupted by an unload, and a request arriving during one just waits for it.
+  [`bench/unload_stress.py`](bench/unload_stress.py) asserts exactly that, because
+  the in-flight count has to be per *request* and not per decode: `enhanceLongText`
+  loops over chunks, so a count that dropped at every chunk seam would open a
+  window for the reaper in the middle of one request.
 - Unloads happen on a 1 s poll, so the real idle time is up to a second longer
   than the timeout.
 - Do not set it shorter than your typical pause between requests. This flag is
@@ -455,10 +459,11 @@ response, and `--naive` remains the honest advice for raw input.
 │   └── Version.swift        # the version, in one place
 ├── llama.xcframework/       # pre-compiled llama.cpp (arm64 macOS)
 │   └── macos-arm64/llama.framework/
-├── bench/                   # draft-mode benchmark (dev only, not shipped)
+├── bench/                   # benchmarks + stress harnesses (dev only, not shipped)
 │   ├── make_corpus.py       # builds the corpus from a HF dataset
 │   ├── bench.py             # measures draft modes against the engine
-│   └── corpus.jsonl         # the generated corpus (20 transcripts)
+│   ├── corpus.jsonl         # the generated corpus (20 transcripts)
+│   └── unload_stress.py     # guards --idle-timeout against reaping mid-request
 ├── hf/                      # publishing the weights to Hugging Face
 │   ├── README.md            # the model card
 │   └── upload.sh            # uploads the GGUF exports
