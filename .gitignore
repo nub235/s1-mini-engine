@@ -18,5 +18,9 @@ test-results.txt
 bench/*.log
 bench/results-*.json
 
+# Python bytecode: importing a bench script leaves one of these next to it
+__pycache__/
+*.pyc
+
 # macOS
 .DS_Store
