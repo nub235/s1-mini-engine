@@ -21,6 +21,15 @@ Requires macOS 14+ on Apple Silicon (the bundled framework is arm64 only).
 
 ## Install
 
+With Homebrew:
+
+```bash
+brew install nub235/tap/s1-mini-engine   # prebuilt binary, no build step
+s1-mini-engine pull                      # fetch the Q6_K weights (~495 MB)
+```
+
+Or build from source:
+
 ```bash
 git clone https://github.com/nub235/s1-mini-engine
 cd s1-mini-engine
