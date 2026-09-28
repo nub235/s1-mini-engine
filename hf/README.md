@@ -1,7 +1,7 @@
 ---
 base_model: superwhisper/s1-mini
 library_name: llama.cpp
-pipeline_tag: text2text-generation
+pipeline_tag: text-generation
 tags:
   - gguf
   - llama.cpp
