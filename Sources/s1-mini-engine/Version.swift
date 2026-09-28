@@ -6,4 +6,4 @@
 //     let versionString = "X.Y.Z"
 //
 // Anything released must be tagged `v` + this string (e.g. v1.0.0).
-let versionString = "1.0.0"
+let versionString = "1.1.0"
